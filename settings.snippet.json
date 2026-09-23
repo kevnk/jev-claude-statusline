@@ -1,0 +1,43 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "bash ~/.claude/statusline/statusline.sh",
+    "refreshInterval": 5
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.claude/hooks/jev-progress.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.claude/hooks/jev-progress.mjs",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.claude/hooks/jev-progress.mjs",
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}
