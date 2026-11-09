@@ -92,8 +92,8 @@ The one detail per tool call:
 Before it sends anything, the hook runs the task, the latest reply and every detail through `redact()`:
 
 - **URLs** keep only scheme, host and path. The query string, the fragment and any `user:password@` are dropped.
-- **Key shapes** become `[REDACTED]`: Anthropic, OpenAI, OpenRouter, Stripe, GitHub, AWS key ids, Google, Slack, xAI and npm keys, JWTs, and PEM private keys.
-- **Values after secret names** become `[REDACTED]` too: `API_KEY=…`, `secret: …`, `"client_secret": "…"`, and the credential after `Authorization: Bearer` or `Basic`. The name stays.
+- **Key shapes** become `[REDACTED]`: Anthropic, OpenAI, OpenRouter, Stripe, GitHub, GitLab, AWS key ids, Google, Slack, xAI, npm, Hugging Face, Groq, Shopify and SendGrid keys, JWTs, Slack and Discord webhook paths, and PEM private keys of every type.
+- **Values after secret names** become `[REDACTED]` too: `API_KEY=…`, `password="…"`, `secret: …`, `"client_secret": "…"`, the credential after `Authorization: Bearer` or `Basic`, `Cookie:` values, `curl -u user:password`, and `--password` or `--token` values. The name stays.
 
 The cached task in `~/.claude/cache/jev-progress/` is redacted the same way.
 

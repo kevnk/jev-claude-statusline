@@ -104,9 +104,15 @@ function writeTranscript(name, lines) {
   return file;
 }
 
+const cached = (sid) => JSON.parse(readFileSync(join(config, "cache", "jev-progress", `${sid}.json`), "utf8"));
+
+// A partial leak counts: no 12-character run of any secret may reach TypeSafe.
 function assertNoSecrets(sent) {
   for (const [name, secret] of Object.entries(S)) {
-    assert.ok(!sent.includes(secret), `${name} reached TypeSafe: ${sent}`);
+    for (let i = 0; i + 12 <= secret.length; i++) {
+      const piece = secret.slice(i, i + 12);
+      assert.ok(!sent.includes(piece), `part of ${name} (${piece}) reached TypeSafe: ${sent}`);
+    }
   }
 }
 
@@ -198,4 +204,35 @@ test("the stub guard stops the hook when no stub is set", async () => {
   });
   const code = await new Promise((resolve) => child.on("exit", resolve));
   assert.notEqual(code, 0);
+});
+
+test("URL passwords holding a raw @ or # lose their whole user:password part", async () => {
+  await runHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: "s4",
+    prompt_id: "p4",
+    prompt: `Compare postgres://admin:p@${S.urlPassword}Tail@db.internal/app with mysql://root:ab#${S.urlPassword}Tail@db/app`,
+  });
+  assert.equal(cached("s4").task, "Compare postgres://db.internal/app with mysql://db/app");
+});
+
+test("a private key pasted into the prompt goes whole", async () => {
+  const b64 = body(64, ALNUM + "+/");
+  const pem = j("-----BEGIN ", "RSA PRIVATE KEY-----\n", b64, "\n", b64, "\n-----END ", "RSA PRIVATE KEY-----");
+  await runHook({ hook_event_name: "UserPromptSubmit", session_id: "s5", prompt_id: "p5", prompt: `Use JWT_SECRET="${pem}" here` });
+  const { task } = cached("s5");
+  assert.ok(!task.includes(b64.slice(0, 12)), task);
+  assert.equal(task, 'Use JWT_SECRET="[REDACTED]" here');
+});
+
+test("a prompt with 300 KB of blank space doesn't stall the hook", async () => {
+  const started = Date.now();
+  await runHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: "s6",
+    prompt_id: "p6",
+    prompt: `Fix it"token"${" ".repeat(150_000)}:${" ".repeat(150_000)}"x" and ${"a-".repeat(50_000)}`,
+  });
+  // An unbounded \s* in the lookbehinds made this take minutes.
+  assert.ok(Date.now() - started < 3000, `took ${Date.now() - started} ms`);
 });
