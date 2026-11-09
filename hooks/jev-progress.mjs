@@ -47,6 +47,86 @@ const TIMEOUT_MS = 8_000, LOCK_STALE_MS = 20_000, LOCK_WAIT_MS = 10_000, LOCK_PO
 const str = (v) => (typeof v === "string" ? v : "");
 const trunc = (s, n) => (s.length > n ? s.slice(0, n) : s);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Every string in the state sent to TypeSafe goes through redact() first, with the same
+// rules as second-opinion-mcp's files.ts. Every match becomes "[REDACTED]". Rules written with a lookbehind keep the name or
+// scheme in front of the secret, so a reviewer can still see what was removed. Every
+// repeat inside a lookbehind is bounded: an unbounded \s* there made a long run of blank
+// space take quadratic time.
+const SECRET_PATTERNS = [
+  // PEM private keys of every type. First, so a key stored as a secret's value
+  // (JWT_SECRET="-----BEGIN ...") goes whole. With an END line in the next 12,000
+  // characters the whole block goes, comment markers and string quotes included. Without
+  // one, the base64 after the BEGIN line goes.
+  /-----BEGIN [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]{0,12000}?-----END [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----|[A-Za-z0-9+/=\s\\:,.-]*)/g,
+  // A value after a secret name with no quotes around the name: password="correct horse",
+  // API_KEY=\"...\", token: abc. A quoted value runs to its own closing quote, an unquoted
+  // one to the next space or quote. A value read from the environment (process.env.X, $X,
+  // ${X}) is a reference, not a secret, so it stays readable.
+  /(?<=(?:(?:api|secret|access)[_-]?key|secret|token|password|passwd|authorization)\s{0,32}[:=]\s{0,32}\\?(["']))(?!process\.env\b|os\.environ\b|import\.meta\.env\b|\$\{|\$[A-Z_]+\b|(?:bearer|basic|token|bot)\s)(?:(?!\\?\1)[^\n]){8,}(?=\\?\1)/gi,
+  /(?<=(?:(?:api|secret|access)[_-]?key|secret|token|password|passwd|authorization)\s{0,32}[:=]\s{0,32}(?:\\?["'])?)(?!process\.env\b|os\.environ\b|import\.meta\.env\b|\$\{|\$[A-Z_]+\b)[^\s"'\\]{8,}/gi,
+  // Anthropic (sk-ant-api03-, -admin01-, -oat01-), OpenAI sk-proj-, sk-svcacct-,
+  // sk-admin-, and OpenRouter sk-or-v1-.
+  /\bsk-[A-Za-z0-9]{2,12}-[A-Za-z0-9_-]{20,}/g,
+  /sk-[a-zA-Z0-9]{20,}/g,
+  /\b[rs]k_(?:live|test)_[A-Za-z0-9]{20,}/g,
+  /gh[pousr]_[A-Za-z0-9]{20,}/g,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
+  /\bglpat-[A-Za-z0-9_-]{20,}/g,
+  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
+  /\bAIza[A-Za-z0-9_-]{35}/g,
+  /\bx(?:ox[a-z]|app)-[A-Za-z0-9-]{10,}/g,
+  /\bxai-[A-Za-z0-9]{20,}/g,
+  /\bnpm_[A-Za-z0-9]{36}\b/g,
+  /\bhf_[A-Za-z0-9]{30,}/g,
+  /\bgsk_[A-Za-z0-9]{40,}/g,
+  /\bshp(?:at|ca|pa|ss)_[A-Fa-f0-9]{32}\b/g,
+  // SendGrid keys and JWTs (which is what Supabase service-role keys are). The lookbehind
+  // stops a new attempt inside a run like "eyJ-eyJ-...", which took quadratic time.
+  /(?<![A-Za-z0-9_.-])SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g,
+  /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
+  // Slack and Discord webhook URLs carry their secret in the path.
+  /(?<=\bhooks\.slack\.com\/(?:services|workflows|triggers)\/)[A-Za-z0-9/_-]{20,}/g,
+  /(?<=\bdiscord(?:app)?\.com\/api\/webhooks\/)[0-9]+\/[A-Za-z0-9_-]{20,}/g,
+  // The password in scheme://user:password@host, even one with a raw @ in it. A ${VAR}
+  // or {var} placeholder stays.
+  /(?<=\b[a-z][a-z0-9+.-]{0,30}:\/\/[^\s/:@]{0,256}:)(?!\$?\{)[^\s/]{1,256}(?=@)/gi,
+  // Query-string secrets: ?token=..., &sig=..., X-Amz-Signature=...
+  /(?<=[?&](?:access_token|api_key|apikey|key|token|secret|client_secret|password|sig|signature|code|x-amz-signature|x-amz-credential|x-amz-security-token)=)(?!\$|\{)[^&\s#"']{4,}/gi,
+  // Command-line credentials: curl -u user:password, --password X, --token=X. The -u
+  // rule needs curl earlier on the line, because date -u and docker -u uid:gid aren't
+  // credentials.
+  /(?<=\bcurl\b[^\n]{0,200}\s(?:-u|--user)\s{1,8}[^\s:'"]{1,64}:)[^\s'"]{1,256}/g,
+  /(?<=--(?:password|passwd|token|api-key|secret)(?:=|\s{1,8}))(?!-|\$\{|\$[A-Z_]+\b)[^\s"']{4,}/g,
+  // A Cookie or Set-Cookie header's value.
+  /(?<=\b(?:Set-)?Cookie:\s{0,8})(?=[^\r\n"']*=)[^\r\n"']{8,}/g,
+  // Authorization: Bearer|Basic|Token|Bot <credential>, in headers, curl, JSON and
+  // escaped JSON.
+  /(?<=\bauthorization\\?["']?\s{0,32}[:=]\s{0,32}(?:\\?["'`])?(?:bearer|basic|token|bot)\s{1,32})[A-Za-z0-9._~+/=-]{4,}/gi,
+  // A Bearer token anywhere else. 16 characters keeps prose like "Bearer authentication",
+  // and a name=" right after Bearer marks a challenge parameter (resource_metadata="..."),
+  // not a credential.
+  /(?<=\b[Bb]earer\s{1,32})(?![a-z_]{1,64}=")[A-Za-z0-9._~+/-]{16,}(?![A-Za-z0-9._~+/-]|=[A-Za-z])=*/g,
+  // Quoted JSON and YAML names that end in a secret word: "apiKey": "...",
+  // 'client_secret': '...'. Ending in the word, not containing it, keeps i18n keys like
+  // "common.key.pageDown" and fields like "max_tokens" or "key". The value runs to its own
+  // closing quote, so "O'Reilly-..." inside double quotes goes whole.
+  /(?<=["'][\w-]{0,64}(?:token|secret|passw(?:or)?d|(?:api|access|secret|private|auth|client|signing|encryption|master|license)[_-]?key)\\?["']\s{0,32}:\s{0,32}\\?(["']))(?!\$\{)(?:(?!\\?\1)[^\n]){8,}(?=\\?\1)/gi,
+  // Env-style names: "STRIPE_KEY": "...". Both quoted-name rules keep "${VAR}"
+  // placeholders, which MCP and CI configs use to point at the environment.
+  /(?<=["'][A-Z0-9_]{0,64}_KEY\\?["']\s{0,32}:\s{0,32}\\?(["']))(?!\$\{)(?:(?!\\?\1)[^\n]){8,}(?=\\?\1)/g,
+];
+// A query string or fragment can carry a token or a signature, and user:password@ is a
+// credential, so every URL keeps only its scheme, host and path. The scheme is capped at 31
+// characters: unbounded, a long run like "a-a-a-..." took quadratic time. user:password@
+// runs to the last @ before the path, because a password can hold a raw @, # or ?.
+const URL_RE = /\b[a-z][a-z0-9+.-]{0,30}:\/\/[^\s"'<>`]+/gi;
+const stripUrl = (url) => url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/\s]*@/i, "$1").replace(/[?#].*$/, "");
+function redact(text) {
+  let out = str(text).replace(URL_RE, stripUrl);
+  for (const re of SECRET_PATTERNS) out = out.replace(re, "[REDACTED]");
+  return out;
+}
 const remove = (p) => {
   try { fs.rmSync(p, { recursive: true, force: true }); } catch {}
 };
@@ -135,13 +215,13 @@ const DETAIL = {
   Agent: (i) => str(i.description), Skill: (i) => str(i.skill), WebFetch: (i) => str(i.url),
 };
 
+// A tool without a DETAIL entry, which is every MCP tool, sends its name only. Its first
+// string input could be a message body, a search query or a file's contents.
 function summarize(name, input) {
   const raw = str(name);
   const tool = raw.startsWith("mcp__") ? raw.slice(raw.lastIndexOf("__") + 2) : raw;
   const i = input && typeof input === "object" ? input : {};
-  const first = Object.values(i).find((v) => typeof v === "string");
-  const detail = DETAIL[tool] ? DETAIL[tool](i) : first ? trunc(first, 120) : "";
-  return { tool, detail };
+  return { tool, detail: DETAIL[tool] ? DETAIL[tool](i) : "" };
 }
 
 function parseTranscript(file) {
@@ -253,7 +333,7 @@ function onPrompt(payload, file) {
     session_id: str(payload.session_id),
     prompt_id: str(payload.prompt_id),
     started_at: Date.now(),
-    task: trunc(task, MAX_TASK),
+    task: trunc(redact(task), MAX_TASK),
     turn_status: "working",
     samples: [],
   });
@@ -273,10 +353,11 @@ async function onActivity(payload, file, lock) {
     tools.push(summarize(payload.tool_name, payload.tool_input));
   }
   const cached = previous.prompt_id === promptId ? str(previous.task) : "";
+  // Redact before truncating, so a cut can't leave a key too short to match.
   const state = {
-    task: trunc(cached || parsed.task || str(previous.task), MAX_TASK),
-    activity: tools.slice(-MAX_ACTIVITY).map(({ tool, detail }) => ({ tool, detail })),
-    claude_latest_message: trunc(stopped ? str(payload.last_assistant_message) : parsed.latest, MAX_MESSAGE),
+    task: trunc(redact(cached || parsed.task || previous.task), MAX_TASK),
+    activity: tools.slice(-MAX_ACTIVITY).map(({ tool, detail }) => ({ tool, detail: redact(detail) })),
+    claude_latest_message: trunc(redact(stopped ? payload.last_assistant_message : parsed.latest), MAX_MESSAGE),
     turn_status: turnStatus,
   };
   if (!(await acquireLock(lock, stopped))) return;
