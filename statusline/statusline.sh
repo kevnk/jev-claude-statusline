@@ -5,7 +5,6 @@ input=$(cat)
 
 # Extract values using jq
 model=$(echo "$input" | jq -r '.model.display_name')
-model_id=$(echo "$input" | jq -r '.model.id // ""')
 current_dir=$(echo "$input" | jq -r '.workspace.current_dir')
 
 # Get context window info from Claude Code

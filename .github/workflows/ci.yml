@@ -25,3 +25,5 @@ jobs:
       - run: node --test
       # Status line render checks. Needs bash and jq, both on the runner image.
       - run: bash tests/statusline-test.sh
+      # The shipped status line and its test script. The scripts/ helpers are dev-only and not linted.
+      - run: shellcheck statusline/statusline.sh tests/statusline-test.sh
