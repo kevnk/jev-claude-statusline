@@ -14,7 +14,7 @@ On each `UserPromptSubmit`, `PostToolUse`, and `Stop` hook, `hooks/jev-progress.
 | `done` | Noul | Whether the turn finished and reported the outcome |
 | `waiting_on_user` | Noul | Whether Claude is stopped waiting on you |
 
-Answers are cached under `~/.claude/cache/jev-progress/<session_id>.json`. `statusline/statusline.sh` reads that cache and renders the segment. Bash tool details sent to Jev use the human `description` field, not raw command text.
+Answers are cached under `~/.claude/cache/jev-progress/<session_id>.json`. `statusline/statusline.sh` reads that cache and renders the segment. [Privacy](#privacy) lists exactly what goes to TypeSafe.
 
 ## Install
 
@@ -60,11 +60,44 @@ With `TYPESAFE_API_KEY` set and a real Claude Code transcript `.jsonl`:
 
 `verify-races.sh` exercises concurrent PostToolUse / Stop behavior.
 
+The offline test needs only `node`, with no key and no network. Its requests go to a stub on 127.0.0.1:
+
+```sh
+node --test
+```
+
 ## Privacy
 
-- Task text and latest assistant message (truncated) are sent to TypeSafe.
-- Recent tool activity uses names plus short details; Bash uses `description`, not the command string.
-- Do not use confidential prompts without authorization for hosted inference.
+The hook sends a request to TypeSafe after each tool call (unless one is already in flight) and when Claude stops. Submitting a prompt sends nothing. Each request carries your TypeSafe key as a `Bearer` header, the model name, the fixed questions above, and this `state`:
+
+| Field | What it holds |
+| --- | --- |
+| `task` | Your latest prompt, up to 3,000 characters |
+| `claude_latest_message` | Claude's latest text reply, up to 800 characters |
+| `turn_status` | `working` or `stopped` |
+| `activity` | The last 15 tool calls, as a tool name plus one detail |
+
+The one detail per tool call:
+
+| Tool | Detail sent |
+| --- | --- |
+| Bash | The `description`, never the command |
+| Read, Edit, Write, MultiEdit, NotebookEdit | The file name, not its path or contents |
+| Grep, Glob | The search pattern |
+| Agent | The `description` |
+| Skill | The skill name |
+| WebFetch | The URL, without its query string |
+| Every other tool, MCP tools included | Nothing. Only the tool name |
+
+Before it sends anything, the hook runs the task, the latest reply and every detail through `redact()`:
+
+- **URLs** keep only scheme, host and path. The query string, the fragment and any `user:password@` are dropped.
+- **Key shapes** become `[REDACTED]`: Anthropic, OpenAI, OpenRouter, Stripe, GitHub, AWS key ids, Google, Slack, xAI and npm keys, JWTs, and PEM private keys.
+- **Values after secret names** become `[REDACTED]` too: `API_KEY=…`, `secret: …`, `"client_secret": "…"`, and the credential after `Authorization: Bearer` or `Basic`. The name stays.
+
+The cached task in `~/.claude/cache/jev-progress/` is redacted the same way.
+
+Redaction is a pattern list, not a guarantee. A password typed into a prompt with no secret-looking name in front of it still goes out. Don't use confidential prompts unless you're allowed to send them to hosted inference.
 
 ## Related
 

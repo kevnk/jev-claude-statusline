@@ -47,6 +47,46 @@ const TIMEOUT_MS = 8_000, LOCK_STALE_MS = 20_000, LOCK_WAIT_MS = 10_000, LOCK_PO
 const str = (v) => (typeof v === "string" ? v : "");
 const trunc = (s, n) => (s.length > n ? s.slice(0, n) : s);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Every string in the state sent to TypeSafe goes through redact() first. The key shapes
+// match second-opinion-mcp's files.ts. Rules written with a lookbehind keep the name or
+// scheme in front of the secret, so Jev still sees that a key was there.
+const SECRET_PATTERNS = [
+  // NAME=value and name: value with an unquoted name. A value read from the environment
+  // (process.env.X, $X, ${X}) is a reference, not a secret.
+  /(?<=(?:(?:api|secret|access)[_-]?key|secret|token|password|passwd|authorization)\s*[:=]\s*["']?)(?!process\.env\b|os\.environ\b|import\.meta\.env\b|\$\{|\$[A-Z_]+\b)[^\s"'\\]{8,}/gi,
+  // PEM private keys of every type, and a block cut off before its END line.
+  /-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[A-Za-z0-9+/=\s\\:,.-]*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|(?![A-Za-z0-9+/=\s\\:,.-]))/g,
+  // Anthropic (sk-ant-api03-, -admin01-, -oat01-), OpenAI sk-proj-, sk-svcacct-,
+  // sk-admin-, and OpenRouter sk-or-v1-.
+  /\bsk-[A-Za-z0-9]{2,12}-[A-Za-z0-9_-]{20,}/g,
+  /sk-[a-zA-Z0-9]{20,}/g,
+  /\b[rs]k_(?:live|test)_[A-Za-z0-9]{20,}/g,
+  /gh[pousr]_[A-Za-z0-9]{20,}/g,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
+  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
+  /\bAIza[A-Za-z0-9_-]{35}/g,
+  /\bx(?:ox[a-z]|app)-[A-Za-z0-9-]{10,}/g,
+  /\bxai-[A-Za-z0-9]{20,}/g,
+  /\bnpm_[A-Za-z0-9]{36}\b/g,
+  /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
+  // Authorization: Bearer|Basic|Token|Bot <credential>.
+  /(?<=\bauthorization["']?\s*[:=]\s*["'`]?(?:bearer|basic|token|bot)\s+)[A-Za-z0-9._~+/=-]{4,}/gi,
+  // A Bearer token anywhere else, but not a challenge parameter like resource_metadata="...".
+  /(?<=\b[Bb]earer\s+)[A-Za-z0-9._~+/-]{16,}(?![A-Za-z0-9._~+/-]|=[A-Za-z"])=*/g,
+  // Quoted JSON and YAML names that end in a secret word: "apiKey": "...".
+  /(?<=["'][\w-]*(?:token|secret|passw(?:or)?d|(?:api|access|secret|private|auth|client|signing|encryption|master|license)[_-]?key)["']\s*:\s*["'])(?!\$\{)[^"'\n]{8,}(?=["'])/gi,
+  /(?<=["'][A-Z0-9_]*_KEY["']\s*:\s*["'])(?!\$\{)[^"'\n]{8,}(?=["'])/g,
+];
+// A query string or fragment can carry a token or a signature, and user:password@ is a
+// credential, so every URL keeps only its scheme, host and path.
+const URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>`]+/gi;
+const stripUrl = (url) => url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/?#\s@]*@/i, "$1").replace(/[?#].*$/, "");
+function redact(text) {
+  let out = str(text).replace(URL_RE, stripUrl);
+  for (const re of SECRET_PATTERNS) out = out.replace(re, "[REDACTED]");
+  return out;
+}
 const remove = (p) => {
   try { fs.rmSync(p, { recursive: true, force: true }); } catch {}
 };
@@ -135,13 +175,13 @@ const DETAIL = {
   Agent: (i) => str(i.description), Skill: (i) => str(i.skill), WebFetch: (i) => str(i.url),
 };
 
+// A tool without a DETAIL entry, which is every MCP tool, sends its name only. Its first
+// string input could be a message body, a search query or a file's contents.
 function summarize(name, input) {
   const raw = str(name);
   const tool = raw.startsWith("mcp__") ? raw.slice(raw.lastIndexOf("__") + 2) : raw;
   const i = input && typeof input === "object" ? input : {};
-  const first = Object.values(i).find((v) => typeof v === "string");
-  const detail = DETAIL[tool] ? DETAIL[tool](i) : first ? trunc(first, 120) : "";
-  return { tool, detail };
+  return { tool, detail: DETAIL[tool] ? DETAIL[tool](i) : "" };
 }
 
 function parseTranscript(file) {
@@ -253,7 +293,7 @@ function onPrompt(payload, file) {
     session_id: str(payload.session_id),
     prompt_id: str(payload.prompt_id),
     started_at: Date.now(),
-    task: trunc(task, MAX_TASK),
+    task: trunc(redact(task), MAX_TASK),
     turn_status: "working",
     samples: [],
   });
@@ -273,10 +313,11 @@ async function onActivity(payload, file, lock) {
     tools.push(summarize(payload.tool_name, payload.tool_input));
   }
   const cached = previous.prompt_id === promptId ? str(previous.task) : "";
+  // Redact before truncating, so a cut can't leave a key too short to match.
   const state = {
-    task: trunc(cached || parsed.task || str(previous.task), MAX_TASK),
-    activity: tools.slice(-MAX_ACTIVITY).map(({ tool, detail }) => ({ tool, detail })),
-    claude_latest_message: trunc(stopped ? str(payload.last_assistant_message) : parsed.latest, MAX_MESSAGE),
+    task: trunc(redact(cached || parsed.task || previous.task), MAX_TASK),
+    activity: tools.slice(-MAX_ACTIVITY).map(({ tool, detail }) => ({ tool, detail: redact(detail) })),
+    claude_latest_message: trunc(redact(stopped ? payload.last_assistant_message : parsed.latest), MAX_MESSAGE),
     turn_status: turnStatus,
   };
   if (!(await acquireLock(lock, stopped))) return;
