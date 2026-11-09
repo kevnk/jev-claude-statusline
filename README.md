@@ -60,7 +60,7 @@ With `TYPESAFE_API_KEY` set and a real Claude Code transcript `.jsonl`:
 
 `verify-races.sh` exercises concurrent PostToolUse / Stop behavior.
 
-The offline test needs only `node`, with no key and no network. Its requests go to a stub on 127.0.0.1:
+The offline tests need only `node`, with no key and no network. They cover redaction and what the hook sends, caches and skips (missing key, HTTP errors, locks, a newer prompt mid-request, pruning). Their requests go to a stub on 127.0.0.1:
 
 ```sh
 node --test
