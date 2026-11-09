@@ -1,4 +1,4 @@
-// Loaded with --import by tests/redact.test.mjs. It sends every fetch the hook makes to the
+// Loaded with --import by tests/harness.mjs. It sends every fetch the hook makes to the
 // local stub in JEV_TEST_STUB, and the hook won't start without one, so no test can reach
 // TypeSafe. That holds for an old hook with no endpoint setting, too.
 const stub = process.env.JEV_TEST_STUB ?? "";
