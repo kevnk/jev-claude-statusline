@@ -3,7 +3,8 @@
 set -euo pipefail
 HOOK=$1; SL=$2; TR=$3
 SID=$(basename "$TR" .jsonl)
-export CLAUDE_CONFIG_DIR=$(mktemp -d)/.claude
+CLAUDE_CONFIG_DIR=$(mktemp -d)/.claude
+export CLAUDE_CONFIG_DIR
 mkdir -p "$CLAUDE_CONFIG_DIR"
 CACHE="$CLAUDE_CONFIG_DIR/cache/jev-progress/$SID.json"
 common() { jq -n --arg sid "$SID" --arg tr "$TR" --arg ev "$1" --arg pid "$2" '{session_id:$sid, transcript_path:$tr, cwd:"/Users/kk/.claude", permission_mode:"auto", hook_event_name:$ev, prompt_id:$pid}'; }
