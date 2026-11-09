@@ -1,0 +1,27 @@
+# Runs the tests on every pull request and on pushes to main.
+# Read-only token, no secrets, no deploy. Nothing to install.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: 22
+      # Hook and redaction tests. Requests go to a stub on 127.0.0.1, never TypeSafe.
+      - run: node --test
+      # Status line render checks. Needs bash and jq, both on the runner image.
+      - run: bash tests/statusline-test.sh
